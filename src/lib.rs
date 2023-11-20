@@ -49,6 +49,16 @@ impl FromStr for ShellBin {
     }
 }
 
+impl ToString for ShellBin {
+    fn to_string(&self) -> String {
+        match &self {
+            ShellBin::Zsh => String::from("ZSH"),
+            ShellBin::Bash => String::from("BASH"),
+            _ => "".to_string(),
+        }
+    }
+}
+
 static SHELL: [ShellProfile; 2] = [
     ShellProfile {
         shell_bin: ShellBin::Zsh,
@@ -63,7 +73,7 @@ static SHELL: [ShellProfile; 2] = [
         shell_cfg_files: phf_map! {
             "profile" => Cow::Borrowed(".bash_profile"),
             "login" => Cow::Borrowed(".bash_login"),
-            "shellrc" => Cow::Borrowed(".bashrc"),
+            "shellrc" => Cow::Borrowed(".profile"),
         },
     },
 ];
@@ -78,20 +88,28 @@ struct ShellProfile {
 /// If it is then nothing will happen.
 /// If it's not then it will be added
 /// to your profile.
-pub fn check_or_set<T, U>(var: T, value: U) -> io::Result<()>
+pub fn check_or_set<T, U>(var: T, value: U) -> io::Result<File>
 where
     T: fmt::Display + AsRef<std::ffi::OsStr>,
     U: fmt::Display,
 {
-    env::var(&var).map(|_| ()).or_else(|_| set(var, value))
+    // let file = env::var(&var).map(|_| ()).or_else(|_| set(var, value));
+
+    let env_var = env::var(&var);
+    match env_var {
+        Ok(_) => get_profile(),
+        Err(_) => set(var, value)
+    }
 }
 
 /// Appends a value to an environment variable
 /// Useful for appending a value to PATH
-pub fn append<T: fmt::Display>(var: T, value: T) -> io::Result<()> {
+pub fn append<T: fmt::Display>(var: T, value: T) -> io::Result<File> {
     let mut profile = get_profile()?;
     writeln!(profile, "\nexport {}=\"{}:${}\"", var, value, var)?;
-    profile.flush()
+    profile.flush()?;
+
+    Ok(profile)
 }
 
 /// Sets an environment variable without checking
@@ -100,18 +118,33 @@ pub fn append<T: fmt::Display>(var: T, value: T) -> io::Result<()> {
 /// assignments in your profile.
 /// It's recommended to use `check_or_set`
 /// unless you are certain it doesn't exist.
-pub fn set<T: fmt::Display, U: fmt::Display>(var: T, value: U) -> io::Result<()> {
+pub fn set<T: fmt::Display, U: fmt::Display>(var: T, value: U) -> io::Result<File> {
     let mut profile = get_profile()?;
     writeln!(profile, "\nexport {}={}", var, value)?;
-    profile.flush()
+    profile.flush()?;
+
+    Ok(profile)
 }
 
 fn get_profile() -> io::Result<File> {
     let shell_bin = env::var("SHELL").expect("SHELL environment variable was not found");
     let mut shell_bin = shell_bin.as_str();
 
-    dirs::home_dir()
-        .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "No home directory"))
+
+    shell_bin = shell_bin
+        .split('/')
+        .last()
+        .expect("Unable to parse shell path in environment variables");
+
+    let dir = {
+        if shell_bin.to_uppercase() == ShellBin::Zsh.to_string() {
+            env::var("ZDOTDIR").map(PathBuf::from).ok()
+        } else {
+            dirs::home_dir()
+        }
+    };
+
+    dir.ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "No home directory"))
         .and_then(|hd| {
             hd.clone()
                 .as_path()
@@ -123,10 +156,7 @@ fn get_profile() -> io::Result<File> {
                     )
                 })
                 .and_then(|profile| {
-                    shell_bin = shell_bin
-                        .split('/')
-                        .last()
-                        .expect("Unable to parse shell path in environment variables");
+
 
                     fs::metadata(profile)
                         .map_err(|_| {
@@ -173,7 +203,6 @@ fn find_profile(mut profile: PathBuf, shell_bin: &str) -> io::Result<File> {
 
                 return match open_opts.open(profile.clone()) {
                     Ok(f) => {
-                        println!("Selected: {}", profile.display());
                         Ok(f)
                     }
                     Err(_) => {
